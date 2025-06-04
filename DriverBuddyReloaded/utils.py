@@ -306,39 +306,40 @@ DRIVER_SIGS = {
         "VmbChannelAllocate"
     ],
 }
-    
-#     if not driver_type:
-#         print("[!] Unable to determine driver type; assuming WDM")
-#         log_file.write("[!] Unable to determine driver type; assuming WDM\n")
-#         driver_type = "WDM"
-#         real_driver_entry = check_for_fake_driver_entry(driver_entry_addr, log_file)
-#         real_ddc_addr = locate_ddc(real_driver_entry, log_file)
-#         if real_ddc_addr:
-#             for ddc in real_ddc_addr.values():
-#                 define_ddc(ddc)
-#         find_dispatch_function(log_file)
-
 
 def get_driver_id(driver_entry_addr, log_file):
     """
-    imports_map: set 또는 list 형태의 Import 심볼 이름 모음
+    imports_map: dict 형태의 Import 심볼 이름(key)과 주소(value)
     driver_entry_addr: PE의 DriverEntry 주소
-    log_file: open()-한 파일 객체
+    log_file: open한 파일 객체
     """
-    # 대소문자 무시용 lowercase 집합
-    lower_imports = {s.lower() for s in imports_map}
+    global imports_map
+    # If imports_map is empty, try to re-populate
+    if not imports_map:
+        print("[!] imports_map empty, retrying to populate...")
+        populate_function_map()
+        print(f"[+] imports_map now has {len(imports_map)} entries")
+    
+    # lower-case 키 기반의 imports 맵
+    lower_imports = {name.lower(): addr for name, addr in imports_map.items()}
 
-    # ─ 1단계: 시그니처 사전 매칭 ────────────────────────
+    # 최종 fallback 설정
     driver_type = ""
+
+    # DRIVER_SIGS의 타입 순회 및 시그니처 체크
     for dtype, sigs in DRIVER_SIGS.items():
         if any(sig.lower() in lower_imports for sig in sigs):
             driver_type = dtype
             break
 
-    # ─ 2단계: 타입별 후처리(기존 로직 유지) ──────────────
-    if driver_type == "WDF":            # WDF이면 추가 파싱
+    # 기존 DriverBuddyReloaded 호환 위해 "KMDF" → "WDF"
+    if driver_type == "KMDF":
+        driver_type = "WDF"
+
+    # 타입별 추가처리
+    if driver_type == "WDF":
         populate_wdf()
-    elif driver_type == "":             # 아무 시그니처에도 안 맞음 → WDM
+    elif driver_type == "":
         print("[!] Unable to determine driver type; assuming WDM")
         log_file.write("[!] Unable to determine driver type; assuming WDM\n")
         driver_type = "WDM"
@@ -350,8 +351,6 @@ def get_driver_id(driver_entry_addr, log_file):
         find_dispatch_function(log_file)
 
     return driver_type
-
-
 
 def is_driver():
     """Return the address of `DriverEntry` if present, otherwise **False**."""

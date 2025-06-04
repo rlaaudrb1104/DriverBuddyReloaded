@@ -15,7 +15,7 @@ import ida_bytes
 import idaapi
 import ida_idaapi
 import idc
-
+import ida_ida
 from . import wdf_structs
 
 VersionInfo = namedtuple("VersionInfo", ["library", "major", "minor"])
@@ -35,7 +35,7 @@ def log(msg):
 # ---------------------------------------------------------------------------
 
 def add_struct(version):
-    is64 = idaapi.get_inf_structure().is_64bit()
+    is64 = ida_ida.inf_is_64bit()
     FF_PTR = ida_bytes.FF_QWORD if is64 else ida_bytes.FF_DWORD
     ptr_size = 8 if is64 else 4
 
@@ -77,7 +77,7 @@ def add_struct(version):
 # ---------------------------------------------------------------------------
 
 def populate_wdf():
-    is64 = idaapi.get_inf_structure().is_64bit()
+    is64 = ida_ida.inf_is_64bit()
     ptr_size = 8 if is64 else 4
     get_ptr = (lambda ea: idc.get_qword(ea)) if is64 else (lambda ea: idc.get_wide_dword(ea))
 
