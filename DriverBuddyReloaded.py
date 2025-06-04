@@ -14,12 +14,10 @@ Updated in 2021 by Paolo Stagno aka VoidSec: https://voidsec.com - https://twitt
 """
 # needed GLOBALs
 driver_name = idaapi.get_root_filename()
-path = "{}{}".format(os.getcwd(), os.sep)
-ioctl_file_name = "{}-{}-{}-IOCTLs.txt".format(driver_name, utils.today(), utils.timestamp())
-analysis_file_name = "{}-{}-{}-DriverBuddyReloaded_autoanalysis.txt".format(driver_name, utils.today(),
-                                                                            utils.timestamp())
-pool_file_name = "{}-{}-{}-pooltags.txt".format(driver_name, utils.today(), utils.timestamp())
-
+path = "{}".format(os.getcwd())
+ioctl_file_name = os.path.join(path, "{}-IOCTLs.txt".format(driver_name))
+analysis_file_name = os.path.join(path, "{}-DriverBuddyReloaded_autoanalysis.txt".format(driver_name))
+pool_file_name = os.path.join(path,"{}-pooltags.txt".format(driver_name))
 
 class UiAction(idaapi.action_handler_t):
     """
@@ -427,6 +425,7 @@ class DriverBuddyPlugin(idaapi.plugin_t):
         :param args:
         :return:
         """
+        pool = ""
         try:
             with open(analysis_file_name, "w") as log_file:
                 print("\nDriver Buddy Reloaded Auto-analysis\n"

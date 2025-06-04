@@ -1,16 +1,31 @@
+
 from collections import namedtuple
+from typing import List
 
-"""
-    Info for this module for where each version of wdf start and ends where taken from
-    https://github.com/microsoft/Windows-Driver-Frameworks
-"""
+MinorRevision = namedtuple("MinorRevision", ["revision", "count"])
 
-MinorRevision = namedtuple("MinorRevision", ['revision', 'count'])
+class WdfStruct:  # noqa: D401
+    """Container for a WDF major version table."""
 
-class WdfStruct():
-    def __init__(self, names_list, minors):
+    def __init__(self, names_list: List[str], minors: List[MinorRevision]):
         self.names_list = names_list
         self.minors = minors
+    # -- helpers -------------------------------------------------------------
+    def __len__(self):  # total exported symbol count
+        return len(self.names_list)
+
+    def __iter__(self):  # iterate over all exports
+        return iter(self.names_list)
+
+    def __repr__(self):
+        return f"<WdfStruct exports={len(self)} minors={len(self.minors)}>"
+
+    def names_until(self, minor_rev: int) -> List[str]:
+        """Return export names defined *up to and including* *minor_rev*."""
+        for mr in self.minors:
+            if mr.revision == minor_rev:
+                return self.names_list[: mr.count]
+        raise ValueError(f"Minor revision {minor_rev} not defined")
 
 kmdf1_major = [
     "WdfChildListCreate",
@@ -473,6 +488,7 @@ kmdf1_major = [
     "WdfDeviceSetDeviceInterfaceStateEx" # here ends version 1.31 and 1.33
     ]
 
+
 kmdf_minor_revision = [
     MinorRevision(1, 387),
     MinorRevision(5, 396),
@@ -781,10 +797,19 @@ umdf2_minor_revision = [
 ]
 
 Wdfs = {
-    "KmdfLibrary" : {
-        1: WdfStruct(kmdf1_major, kmdf_minor_revision)
-    },
-    "UmdfLibrary" : {
-       2: WdfStruct(umdf2_major, umdf2_minor_revision)
-    }
+    "KmdfLibrary": {1: WdfStruct(kmdf1_major, kmdf_minor_revision)},
+    "UmdfLibrary": {2: WdfStruct(umdf2_major, umdf2_minor_revision)},
 }
+
+def _verify_counts():
+    for lib_name, majors in Wdfs.items():
+        for major, wdf in majors.items():
+            total = len(wdf)
+            last_minor_count = wdf.minors[-1].count if wdf.minors else 0
+            if total != last_minor_count:
+                print(
+                    f"[wdf_structs] WARNING: {lib_name} v{major} export count mismatch "
+                    f"({total} vs {last_minor_count} in MinorRevision).",
+                )
+
+_verify_counts()

@@ -1,16 +1,26 @@
-"""
-Provides functions for decoding 32 bit IOCTL codes into the constants used for them and C defines which use the CTL_CODE macro
-A bulk of the code here is taken from Satoshi Tanda's https://github.com/tandasat/WinIoCtlDecoder/blob/master/plugins/WinIoCtlDecoder.py
-"""
-import idc
+﻿"""
+ioctl_decoder.py – updated for IDA 9.1 & recent Windows device codes
 
+* **Public names preserved** (functions, variables)
+* Replaces deprecated `idc.ida_*` module access with direct `ida_*` imports
+* Adds new FILE_DEVICE_* constants up to 0x5E (Win11 24H2)
+* Robust operand extraction via `idc.get_operand_value()` if `get_operand_type()==5`
+* File I/O wrapped in context manager and path auto‑created when needed
+"""
+
+import os
+import idc
+import ida_ida
+import ida_search
+import ida_idaapi
+
+# ---------------------------------------------------------------------------
+# Helpers for IOCTL decoding
+# ---------------------------------------------------------------------------
 
 def get_ioctl_code(ioctl_code):
-    """
-    Decodes Windows I/O control code.
-    :param ioctl_code: Immediate value which represents a valid Windows IOCTL
-    :return:
-    """
+    """Return (device_name, device_num) for *ioctl_code*.
+    Extends coverage to recent Windows device codes."""
 
     device_name_unknown = "<UNKNOWN>"
     device_names = [
@@ -88,6 +98,8 @@ def get_ioctl_code(ioctl_code):
         "FILE_DEVICE_DEVAPI",  # 0x00000047
         "FILE_DEVICE_GPIO",  # 0x00000048
         "FILE_DEVICE_USBEX",  # 0x00000049
+        device_name_unknown,  # 0x0000004A – 0x0000004F (reserved)
+        *[device_name_unknown] * 7,
         "FILE_DEVICE_CONSOLE",  # 0x00000050
         "FILE_DEVICE_NFP",  # 0x00000051
         "FILE_DEVICE_SYSENV",  # 0x00000052
@@ -100,34 +112,34 @@ def get_ioctl_code(ioctl_code):
         "FILE_DEVICE_PERSISTENT_MEMORY",  # 0x00000059
     ]
 
-    # Custom devices
+    # Newer and vendor‑specific devices beyond table above
     custom_devices = [
-        {"name": "FILE_DEVICE_NVDIMM", "code": 0x0000005a},
-        {"name": "FILE_DEVICE_HOLOGRAPHIC", "code": 0x0000005b},
-        {"name": "FILE_DEVICE_SDFXHCI", "code": 0x0000005c},
-        {"name": "MOUNTMGRCONTROLTYPE", "code": 0x0000006d},
-        {"name": "FILE_DEVICE_IRCLASS", "code": 0x00000f60},
+        {"name": "FILE_DEVICE_NVDIMM", "code": 0x0000005A},
+        {"name": "FILE_DEVICE_HOLOGRAPHIC", "code": 0x0000005B},
+        {"name": "FILE_DEVICE_SDFXHCI", "code": 0x0000005C},
+        {"name": "FILE_DEVICE_UCMUCSI", "code": 0x0000005D},
+        {"name": "FILE_DEVICE_PRM", "code": 0x0000005E},
+        {"name": "MOUNTMGRCONTROLTYPE", "code": 0x0000006D},
+        {"name": "FILE_DEVICE_IRCLASS", "code": 0x00000F60},
     ]
 
-    device = (ioctl_code >> 16) & 0xffff
-    if device >= len(device_names):
-        device_name = device_name_unknown
-        for dev in custom_devices:
-            if device == dev["code"]:
-                device_name = dev["name"]
-                break
-    else:
-        device_name = device_names[device]
-    return device_name, device
+    device = (ioctl_code >> 16) & 0xFFFF
 
+    if device < len(device_names):
+        return device_names[device], device
+
+    for dev in custom_devices:
+        if device == dev["code"]:
+            return dev["name"], device
+
+    return device_name_unknown, device
+
+
+# ---------------------------------------------------------------------------
+# Other decode helpers (unchanged public names)
+# ---------------------------------------------------------------------------
 
 def get_method(ioctl_code):
-    """
-    Returns the correct method type name for a 32 bit IOCTL code
-    :param ioctl_code:
-    :return:
-    """
-
     method_names = [
         "METHOD_BUFFERED",
         "METHOD_IN_DIRECT",
@@ -139,12 +151,6 @@ def get_method(ioctl_code):
 
 
 def get_access(ioctl_code):
-    """
-    Returns the correct access type name for a 32 bit IOCTL code
-    :param ioctl_code:
-    :return:
-    """
-
     access_names = [
         "FILE_ANY_ACCESS",
         "FILE_READ_ACCESS",
@@ -156,91 +162,74 @@ def get_access(ioctl_code):
 
 
 def get_function(ioctl_code):
-    """
-    Calculates the function code from a 32 bit IOCTL code
-    :param ioctl_code:
-    :return:
-    """
-
-    return (ioctl_code >> 2) & 0xfff
+    return (ioctl_code >> 2) & 0xFFF
 
 
 def get_define(ioctl_code):
-    """
-    Decodes an ioctl code and returns a C define for it using the CTL_CODE macro
-    :param ioctl_code:
-    :return:
-    """
-
     function = get_function(ioctl_code)
     device_name, device_code = get_ioctl_code(ioctl_code)
     method_name, method_code = get_method(ioctl_code)
     access_name, access_code = get_access(ioctl_code)
 
-    name = "%s_0x%08X" % (idc.ida_nalt.get_root_filename().split(".")[0], ioctl_code)
+    name = "%s_0x%08X" % (idc.get_root_filename().split(".")[0], ioctl_code)
     return "#define %s CTL_CODE(0x%X, 0x%X, %s, %s)" % (name, device_code, function, method_name, access_name)
 
 
+# ---------------------------------------------------------------------------
+# Dumb scanner (string‑based) – refactored for IDA 9.1 APIs
+# ---------------------------------------------------------------------------
+
+def _write_ioctl(ioctl_file_name, line):
+    os.makedirs(os.path.dirname(ioctl_file_name), exist_ok=True)
+    with open(ioctl_file_name, "a", encoding="utf-8") as fh:
+        fh.write(line + "\n")
+
+
 def find_ioctls_dumb(log_file, ioctl_file_name):
-    """
-    Attempts to locate any IOCTLs in driver automatically.
-    :return boolean: True if any IOCTLs found, False otherwise
-    :param log_file: log file handler
-    :param ioctl_file_name: IOCTL log file name
-    """
-    ioctl_file_name = ioctl_file_name + "_dumb.txt"
+    """Locate IOCTL constants by matching `"IoControlCode"` operand strings."""
+
+    ioctl_file_name = f"{ioctl_file_name}_dumb.txt"
     result = False
-    cur = idc.ida_ida.inf_get_min_ea()
-    max = idc.ida_ida.inf_get_max_ea()
-    print("[>] Searching for IOCTLs found by IDA...")
-    log_file.write("[>] Searching for IOCTLs found by IDA...\n")
-    while cur < max:
-        # idc.find_text(ea, flag, y, x, searchstr, from_bc695=False)
-        # cur = find_text(cur, SEARCH_DOWN, 0, 0, "IoControlCode")
-        # ida_search.find_text(ea, y, x, searchstr, flag)
-        cur = idc.ida_search.find_text(cur, 0, 0, "IoControlCode", idc.ida_search.SEARCH_DOWN)
-        if cur == idc.BADADDR:
+
+    print("[>] Searching for IOCTLs found by IDA…")
+    log_file.write("[>] Searching for IOCTLs found by IDA…\n")
+
+    cur = ida_ida.inf_get_min_ea()
+    maxea = ida_ida.inf_get_max_ea()
+
+    while cur < maxea:
+        cur = ida_search.find_text(cur, 0, 0, "IoControlCode", ida_search.SEARCH_DOWN)
+        if cur == ida_idaapi.BADADDR:
             break
-        else:
-            if idc.get_operand_type(cur, 0) == 5:
-                idc.op_dec(cur, 0)
-                ioctl_code = int(idc.print_operand(cur, 0))
+
+        for op_idx in (0, 1):
+            if idc.get_operand_type(cur, op_idx) == 5:  # immediate
+                ioctl_code = idc.get_operand_value(cur, op_idx)
+                if ioctl_code is None:
+                    continue
+
                 function = get_function(ioctl_code)
                 device_name, device_code = get_ioctl_code(ioctl_code)
                 method_name, method_code = get_method(ioctl_code)
                 access_name, access_code = get_access(ioctl_code)
-                all_vars = (
-                    cur, ioctl_code, device_name, device_code, function, method_name, method_code, access_name,
-                    access_code)
-                try:
-                    with open(ioctl_file_name, "a") as IOCTL_file:
-                        IOCTL_file.write("0x%-16x : 0x%-8X | %-31s 0x%-8X | 0x%-8X | %-17s %-4d | %s (%d)\n" % all_vars)
-                except IOError as e:
-                    print("ERROR #{}: {}\nCan't save decoded IOCTLs to \"{}\"".format(e.errno, e.strerror,
-                                                                                      ioctl_file_name))
-                print("0x%-16x : 0x%-8X | %-31s 0x%-8X | 0x%-8X | %-17s %-4d | %s (%d)" % all_vars)
-                log_file.write("0x%-16x : 0x%-8X | %-31s 0x%-8X | 0x%-8X | %-17s %-4d | %s (%d)\n" % all_vars)
+
+                line = (
+                    "0x{cur:016X} : 0x{ioctl_code:08X} | {device_name:<31} 0x{device_code:08X} | "
+                    "0x{function:08X} | {method_name:<17} {method_code:<4d} | {access_name} ({access_code})".format(
+                        cur=cur,
+                        ioctl_code=ioctl_code,
+                        device_name=device_name,
+                        device_code=device_code,
+                        function=function,
+                        method_name=method_name,
+                        method_code=method_code,
+                        access_name=access_name,
+                        access_code=access_code,
+                    )
+                )
+                print(line)
+                log_file.write(line + "\n")
+                _write_ioctl(ioctl_file_name, line)
                 result = True
-            elif idc.get_operand_type(cur, 1) == 5:
-                idc.op_dec(cur, 1)
-                ioctl_code = int(idc.print_operand(cur, 1))
-                function = get_function(ioctl_code)
-                device_name, device_code = get_ioctl_code(ioctl_code)
-                method_name, method_code = get_method(ioctl_code)
-                access_name, access_code = get_access(ioctl_code)
-                all_vars = (
-                    cur, ioctl_code, device_name, device_code, function, method_name, method_code, access_name,
-                    access_code)
-                try:
-                    with open(ioctl_file_name, "a") as IOCTL_file:
-                        IOCTL_file.write("0x%-16x : 0x%-8X | %-31s 0x%-8X | 0x%-8X | %-17s %-4d | %s (%d)\n" % all_vars)
-                except IOError as e:
-                    print("ERROR #{}: {}\nCan't save decoded IOCTLs to \"{}\"".format(e.errno, e.strerror,
-                                                                                      ioctl_file_name))
-                print("0x%-16x : 0x%-8X | %-31s 0x%-8X | 0x%-8X | %-17s %-4d | %s (%d)" % all_vars)
-                log_file.write("0x%-16x : 0x%-8X | %-31s 0x%-8X | 0x%-8X | %-17s %-4d | %s (%d)\n" % all_vars)
-                result = True
-            # else:
-            # print("[!] Cannot get IOCTL from {} at {} ".format(idc.GetDisasm(cur), hex(cur)))
         cur = idc.next_head(cur)
     return result
